@@ -1,0 +1,9 @@
+{
+  "name": "किसान मित्र (Kisan Mitra)",
+  "description": "An advanced agricultural AI advisor for Indian farmers providing crop disease diagnosis, organic/chemical solutions, and real-time market insights.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
