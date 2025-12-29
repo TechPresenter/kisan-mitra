@@ -1,4 +1,11 @@
 
+export interface User {
+  name: string;
+  email: string;
+  picture?: string;
+  isVerified: boolean;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
