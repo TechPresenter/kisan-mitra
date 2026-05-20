@@ -24,14 +24,19 @@ export const analyzeCrop = async (
   location?: string,
   language: string = 'Hindi'
 ): Promise<{ text: string; sources: GroundingSource[] }> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("Gemini API Key is missing");
+  }
+  const ai = new GoogleGenAI({ apiKey });
   
-  const contents: any[] = [];
+  const parts: any[] = [];
   
   if (image) {
-    contents.push({
+    const mimeType = image.split(';')[0].split(':')[1] || 'image/jpeg';
+    parts.push({
       inlineData: {
-        mimeType: 'image/jpeg',
+        mimeType: mimeType,
         data: image.split(',')[1],
       },
     });
@@ -41,15 +46,21 @@ export const analyzeCrop = async (
   User Language: ${language}.
   Query: ${prompt}`;
 
-  contents.push({ text: fullPrompt });
+  parts.push({ text: fullPrompt });
+
+  const config: any = {
+    systemInstruction: SYSTEM_INSTRUCTION,
+  };
+
+  // Only use googleSearch if no image is provided, as multimodal + search might conflict
+  if (!image) {
+    config.tools = [{ googleSearch: {} }];
+  }
 
   const response: GenerateContentResponse = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: { parts: contents },
-    config: {
-      systemInstruction: SYSTEM_INSTRUCTION,
-      tools: [{ googleSearch: {} }],
-    },
+    contents: { parts },
+    config,
   });
 
   const text = response.text || "क्षमा करें, मैं अभी जानकारी प्राप्त नहीं कर पा रहा हूँ।";
@@ -72,40 +83,30 @@ export const analyzeCrop = async (
 
 // Fetch real-time dashboard data using search grounding and structured JSON output
 export const getDashboardData = async (city: string) => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("Gemini API Key is missing");
+  }
+  const ai = new GoogleGenAI({ apiKey });
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: `Get real-time Mandi rates for top 3 crops and current weather for ${city}. Return JSON format.`,
+    contents: `Get real-time Mandi rates for top 3 crops and current weather for ${city}. Return ONLY a valid JSON object with the following structure:
+{
+  "weather": {
+    "temp": "string (e.g., 32°C)",
+    "condition": "string (e.g., Sunny)",
+    "humidity": "string (e.g., 45%)"
+  },
+  "mandi": [
+    {
+      "crop": "string",
+      "price": "string",
+      "trend": "up, down, or stable"
+    }
+  ]
+}`,
     config: {
-      responseMimeType: "application/json",
       tools: [{ googleSearch: {} }],
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          weather: {
-            type: Type.OBJECT,
-            properties: {
-              temp: { type: Type.STRING },
-              condition: { type: Type.STRING },
-              humidity: { type: Type.STRING }
-            },
-            required: ["temp", "condition", "humidity"]
-          },
-          mandi: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                crop: { type: Type.STRING },
-                price: { type: Type.STRING },
-                trend: { type: Type.STRING, description: "up, down, or stable" }
-              },
-              required: ["crop", "price", "trend"]
-            }
-          }
-        },
-        required: ["weather", "mandi"]
-      }
     }
   });
 
@@ -124,9 +125,26 @@ export const getDashboardData = async (city: string) => {
   }
 
   try {
-    const data = JSON.parse(response.text || "{}");
+    let text = response.text || "{}";
+    const jsonMatch = text.match(/```json\n?([\s\S]*?)\n?```/);
+    if (jsonMatch) {
+      text = jsonMatch[1];
+    } else {
+      const genericMatch = text.match(/```\n?([\s\S]*?)\n?```/);
+      if (genericMatch) {
+        text = genericMatch[1];
+      } else {
+        const firstBrace = text.indexOf('{');
+        const lastBrace = text.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1) {
+          text = text.substring(firstBrace, lastBrace + 1);
+        }
+      }
+    }
+    const data = JSON.parse(text);
     return { ...data, sources };
   } catch (e) {
+    console.error("JSON Parse Error in getDashboardData:", e, response.text);
     return null;
   }
 };
