@@ -109,3 +109,42 @@ export const syncSystemBars = (lightBottom: boolean): void => {
     bar: SystemBarType.NavigationBar,
   }).catch(() => {});
 };
+
+/** Share text via the Android share sheet (Web Share / clipboard fallback on the web). */
+export const shareText = async (title: string, text: string): Promise<'shared' | 'copied' | 'failed'> => {
+  try {
+    if (isNative) {
+      const { Share } = await import('@capacitor/share');
+      await Share.share({ title, text, dialogTitle: title });
+      return 'shared';
+    }
+    if (navigator.share) {
+      await navigator.share({ title, text });
+      return 'shared';
+    }
+  } catch (e: any) {
+    if (/cancel|abort/i.test(e?.message || e?.name || '')) return 'failed';
+  }
+  return (await copyText(text)) ? 'copied' : 'failed';
+};
+
+export const copyText = async (text: string): Promise<boolean> => {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+};

@@ -11,6 +11,10 @@ const config: CapacitorConfig = {
     SystemBars: {
       insetsHandling: 'css',
     },
+    LocalNotifications: {
+      smallIcon: 'ic_stat_kisan',
+      iconColor: '#15803D',
+    },
   },
 };
 

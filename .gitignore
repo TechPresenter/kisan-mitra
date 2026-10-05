@@ -35,3 +35,6 @@ keystore.properties
 # Android build outputs
 android/app/release/
 release/
+
+# Local tooling
+.claude/

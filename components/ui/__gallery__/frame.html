@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="hi">
+  <head>
+    <meta charset="UTF-8" />
+    <title>UI Kit Frames</title>
+    <style>
+      body { margin: 0; background: #888; display: flex; gap: 8px; align-items: flex-start; }
+      iframe { border: 0; background: #fff; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Dev only: ?page=kheti&w=375&h=2000&variants=theme=light|theme=dark,hc=1 renders one
+      // phone-width iframe per variant (an iframe has its own viewport, unlike a headless window).
+      const q = new URLSearchParams(location.search);
+      const w = q.get('w') || '375';
+      const h = q.get('h') || '2000';
+      const page = q.get('page') || 'home';
+      for (const v of (q.get('variants') || 'theme=light').split('|')) {
+        const f = document.createElement('iframe');
+        f.width = w;
+        f.height = h;
+        f.src = `index.html?${v.replace(/,/g, '&')}#${page}`;
+        document.body.appendChild(f);
+      }
+    </script>
+  </body>
+</html>

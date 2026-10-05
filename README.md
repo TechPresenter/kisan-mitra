@@ -62,6 +62,31 @@
 
 ---
 
+## 🚀 Kisan Mitra 2.0
+
+A redesigned, Hindi-first agriculture app built from the same codebase (web + Android via Capacitor).
+
+- **Home dashboard:**
+  - live weather (Open-Meteo) with IMD-based alerts and an "is it safe to spray today?" check
+  - "आज किसान के लिए" advice, plus today's mandi prices and tasks
+- **AI किसान मित्र:** text, voice and photo questions with structured answers, saved conversations and follow-ups. The AI provider is pluggable (`services/ai`).
+- **Crop tools:**
+  - **फसल डॉक्टर:** photo diagnosis with a confidence score, always shown as an AI-based preliminary suggestion
+  - **मेरी फसलें:** growth stages and daily, weekly and monthly advisory
+  - **खेती कैलेंडर:** reminders delivered as Android notifications
+- **Money and measurement:**
+  - मिट्टी जांच score and खेती हिसाब (expenses and profit)
+  - 8 calculators, with bigha size configurable by state
+- **Reference information:**
+  - mandi prices with an AI market signal; prices are indicative and never guaranteed
+  - government schemes checked against official sources
+  - farming techniques
+- **App-wide:** notifications, global search, saved items, multiple farms, and settings for language, dark mode, large text and high contrast.
+- **Offline-first:** data stays on the device and every reading shows when it was last updated.
+- **Not live yet:** community and expert consultation are built behind feature flags (`lib/features.ts`) and switch on once a moderated backend exists.
+
+Docs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/UI_KIT.md`](docs/UI_KIT.md), [`docs/SERVICES.md`](docs/SERVICES.md), [`docs/CATALOG.md`](docs/CATALOG.md), [`docs/SCHEMES.md`](docs/SCHEMES.md).
+
 ## 📱 Android App (APK)
 
 The Android app wraps the same React frontend with [Capacitor 8](https://capacitorjs.com). On Android it uses native plugins for voice input, read-aloud (TTS), and the camera/gallery picker, because the Android WebView doesn't provide the Web Speech API.

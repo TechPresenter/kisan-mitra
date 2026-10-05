@@ -5,6 +5,7 @@ import bodyParser from "body-parser";
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { registerAiGenerate } from "./server/ai-generate";
 
 dotenv.config();
 
@@ -159,6 +160,9 @@ function getFallbackDashboardData(city: string) {
     sources: [],
   };
 }
+
+// Generic provider-agnostic endpoint used by the app (services/ai backend provider)
+registerAiGenerate(app, anthropic);
 
 app.post("/api/analyze", async (req, res) => {
   const { prompt, image, location, language } = req.body;
