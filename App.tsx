@@ -39,8 +39,12 @@ import {
   CheckCircle2
 } from 'lucide-react';
 import { analyzeCrop, getDashboardData } from './services/geminiService';
+import { isNative, pickCropPhoto, listenOnce, getNativeVoices, speakNative, stopNativeSpeech, syncSystemBars } from './services/native';
+import { App as CapacitorApp } from '@capacitor/app';
 import { Message, MandiData, WeatherData, GroundingSource, User } from './types';
 import { t } from './translations';
+import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
+import { jwtDecode } from 'jwt-decode';
 
 // Helper to decode Google JWT locally
 const parseJwt = (token: string) => {
@@ -136,7 +140,7 @@ const App: React.FC = () => {
   const [currentlySpeakingId, setCurrentlySpeakingId] = useState<string | null>(null);
   const [pushEnabled, setPushEnabled] = useState(true);
   const [selectedVoiceURI, setSelectedVoiceURI] = useState<string | null>(null);
-  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [availableVoices, setAvailableVoices] = useState<{ name: string; lang: string; voiceURI: string }[]>([]);
   
   // City/Mandi States
   const [city, setCity] = useState("वाराणसी");
@@ -155,6 +159,13 @@ const App: React.FC = () => {
 
   // --- PERSISTENCE ---
   useEffect(() => {
+    if (isNative) {
+      getNativeVoices()
+        .then(setAvailableVoices)
+        .catch(e => console.warn("Could not load device voices:", e));
+      return;
+    }
+    if (!('speechSynthesis' in window)) return;
     const loadVoices = () => {
       setAvailableVoices(window.speechSynthesis.getVoices());
     };
@@ -168,6 +179,25 @@ const App: React.FC = () => {
     localStorage.setItem('theme', theme);
     document.documentElement.classList.toggle('dark', theme === 'dark');
   }, [theme]);
+
+  useEffect(() => {
+    syncSystemBars(isLoggedIn && theme === 'light');
+  }, [isLoggedIn, theme]);
+
+  // Keep the newest chat message (and the loading indicator) in view
+  useEffect(() => {
+    if (activeTab !== 'chat' || !scrollRef.current) return;
+    scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+  }, [messages, isLoading, activeTab]);
+
+  // The Android TTS engine binds asynchronously, so the first voice query can come back
+  // empty; query again whenever the voice picker opens.
+  useEffect(() => {
+    if (!isNative || !isVoiceModalOpen) return;
+    getNativeVoices()
+      .then(setAvailableVoices)
+      .catch(e => console.warn("Could not load device voices:", e));
+  }, [isVoiceModalOpen]);
 
   useEffect(() => {
     localStorage.setItem('isLoggedIn', isLoggedIn.toString());
@@ -236,7 +266,8 @@ const App: React.FC = () => {
       }
     };
 
-    if (!isLoggedIn) {
+    // Google's web sign-in is blocked inside Android WebViews
+    if (!isLoggedIn && !isNative) {
       checkInterval = window.setInterval(initializeGoogle, 800);
       initializeGoogle(); // Run once immediately
     }
@@ -279,8 +310,8 @@ const App: React.FC = () => {
         setWeather({ temp: '32°C', condition: 'धूप खिली है', humidity: '45%' });
         setDashboardSources([]);
       }
-    } catch (e) {
-      console.error("Dashboard error:", e);
+    } catch (e: any) {
+      console.warn("Dashboard fetch notice, using regional data:", e?.message || e);
       setMandiRates([
         { crop: 'गेहूं', price: '₹2,450', trend: 'up' },
         { crop: 'टमाटर', price: '₹1,200', trend: 'down' },
@@ -297,77 +328,133 @@ const App: React.FC = () => {
     if (activeTab === 'mandi') fetchDashboardData();
   }, [activeTab, city]);
 
-  const speakText = (msgId: string, text: string) => {
-    window.speechSynthesis.cancel();
-    
+  // Strip markdown and split into sentences (incl. Devanagari danda); keeps a trailing
+  // fragment that has no closing punctuation.
+  const toSpeechChunks = (text: string): string[] => {
+    const cleanText = text
+      .replace(/[*#_~`]/g, '')
+      .replace(/\[(.*?)\]\(.*?\)/g, '$1')
+      .trim();
+    if (!cleanText) return [];
+    const sentences = cleanText.match(/[^.!?।\n]+(?:[.!?।\n]+|$)/g) || [cleanText];
+    return sentences.map(s => s.trim()).filter(Boolean);
+  };
+
+  const speakTextNative = (msgId: string, text: string) => {
     if (currentlySpeakingId === msgId) {
+      stopNativeSpeech().catch(() => {});
+      setCurrentlySpeakingId(null);
+      return;
+    }
+    const chunks = toSpeechChunks(text);
+    if (chunks.length === 0) return;
+    setCurrentlySpeakingId(msgId);
+    speakNative(chunks, selectedLang.ttsCode, selectedVoiceURI)
+      .catch(e => console.warn("Speech synthesis notice:", e?.message || e))
+      .finally(() => setCurrentlySpeakingId(prev => (prev === msgId ? null : prev)));
+  };
+
+  const speakText = (msgId: string, text: string) => {
+    if (isNative) {
+      speakTextNative(msgId, text);
+      return;
+    }
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+    // If currently speaking this message, toggle it off
+    if (currentlySpeakingId === msgId) {
+      window.speechSynthesis.cancel();
       setCurrentlySpeakingId(null);
       return;
     }
 
+    // Cancel any previous utterance
+    window.speechSynthesis.cancel();
     setCurrentlySpeakingId(msgId);
-    
-    // Remove markdown characters like *, #, _, ~, ` and links
-    const cleanText = text
-      .replace(/[*#_~`]/g, '')
-      .replace(/\[(.*?)\]\(.*?\)/g, '$1');
 
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    const langCode = selectedLang.ttsCode;
-    utterance.lang = langCode;
+    // Brief timeout so cancel finishes cleanly in Chromium browsers
+    setTimeout(() => {
+      if (!window.speechSynthesis) return;
 
-    let voices = window.speechSynthesis.getVoices();
-    if (!voices || voices.length === 0) {
-      voices = availableVoices;
-    }
-    const langVoices = voices.filter(v => 
-      v.lang.toLowerCase().includes(langCode.split('-')[0].toLowerCase()) ||
-      v.lang.toLowerCase().includes(langCode.toLowerCase())
-    );
-    
-    let selectedVoice;
-    
-    if (selectedVoiceURI) {
-      selectedVoice = voices.find(v => v.voiceURI === selectedVoiceURI);
-    }
-    
-    if (!selectedVoice) {
-      selectedVoice = langVoices.find(v => 
-        v.name.toLowerCase().includes('female') || 
-        v.name.toLowerCase().includes('woman') ||
-        v.name.toLowerCase().includes('samantha') ||
-        v.name.toLowerCase().includes('victoria') ||
-        v.name.toLowerCase().includes('zira') ||
-        v.name.toLowerCase().includes('swara') ||
-        v.name.toLowerCase().includes('aditi') ||
-        v.name.toLowerCase().includes('lekha') ||
-        v.name.toLowerCase().includes('kavya')
+      const sentences = toSpeechChunks(text);
+      if (sentences.length === 0) {
+        setCurrentlySpeakingId(null);
+        return;
+      }
+
+      const langCode = selectedLang.ttsCode;
+      let voices = window.speechSynthesis.getVoices();
+      if (!voices || voices.length === 0) {
+        // On the web these are real SpeechSynthesisVoice objects from getVoices()
+        voices = availableVoices as SpeechSynthesisVoice[];
+      }
+      const langVoices = voices.filter(v => 
+        v.lang.toLowerCase().includes(langCode.split('-')[0].toLowerCase()) ||
+        v.lang.toLowerCase().includes(langCode.toLowerCase())
       );
-    }
+      
+      let selectedVoice;
+      if (selectedVoiceURI) {
+        selectedVoice = voices.find(v => v.voiceURI === selectedVoiceURI);
+      }
+      
+      if (!selectedVoice) {
+        selectedVoice = langVoices.find(v => 
+          v.name.toLowerCase().match(/female|woman|samantha|victoria|zira|swara|aditi|lekha|kavya/)
+        );
+      }
 
-    if (!selectedVoice && langVoices.length > 0) {
-      selectedVoice = langVoices[0];
-    }
+      if (!selectedVoice && langVoices.length > 0) {
+        selectedVoice = langVoices[0];
+      }
 
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
-    }
+      let currentIndex = 0;
 
-    utterance.pitch = 1.0;
-    utterance.rate = 1.0;
+      const speakNextChunk = () => {
+        if (currentIndex >= sentences.length) {
+          setCurrentlySpeakingId(null);
+          return;
+        }
 
-    utterance.onend = () => {
-      setCurrentlySpeakingId(null);
-    };
-    utterance.onerror = () => {
-      setCurrentlySpeakingId(null);
-    };
+        const chunkText = sentences[currentIndex].trim();
+        if (!chunkText) {
+          currentIndex++;
+          speakNextChunk();
+          return;
+        }
 
-    // Keep reference in window object to prevent Garbage Collection from cutting off speech early
-    (window as any).currentUtterance = utterance;
+        const utterance = new SpeechSynthesisUtterance(chunkText);
+        utterance.lang = langCode;
+        
+        if (selectedVoice) {
+          utterance.voice = selectedVoice;
+        }
 
-    window.speechSynthesis.resume();
-    window.speechSynthesis.speak(utterance);
+        utterance.pitch = 1.0;
+        utterance.rate = 1.0;
+
+        utterance.onend = () => {
+          currentIndex++;
+          speakNextChunk();
+        };
+        
+        utterance.onerror = (e: SpeechSynthesisErrorEvent) => {
+          // 'canceled' and 'interrupted' are expected when user stops or switches speech
+          if (e.error !== 'canceled' && e.error !== 'interrupted') {
+            console.warn("Speech synthesis notice:", e.error);
+          }
+          setCurrentlySpeakingId(null);
+        };
+
+        // Keep reference in window object to prevent Garbage Collection from cutting off speech early
+        (window as any).currentUtterance = utterance;
+
+        window.speechSynthesis.resume();
+        window.speechSynthesis.speak(utterance);
+      };
+
+      speakNextChunk();
+    }, 50);
   };
 
   const handleSend = async () => {
@@ -388,8 +475,14 @@ const App: React.FC = () => {
     setInputText('');
     setSelectedImage(null);
 
+    // Recent text turns so follow-up questions keep their context
+    const history = messages
+      .filter(m => m.id !== 'welcome' && !m.id.startsWith('error'))
+      .slice(-10)
+      .map(m => ({ role: m.role, content: m.content }));
+
     try {
-      const { text, sources } = await analyzeCrop(query, img || undefined, city, selectedLang.label);
+      const { text, sources } = await analyzeCrop(query, img || undefined, city, selectedLang.label, history);
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -400,7 +493,7 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error("Chat Error:", err);
       setMessages(prev => [...prev, {
-        id: 'error',
+        id: `error-${Date.now()}`,
         role: 'assistant',
         content: `${t(selectedLang.code, 'errorTech')} ${err.message || String(err)}`,
         timestamp: new Date()
@@ -411,20 +504,72 @@ const App: React.FC = () => {
   };
 
   const toggleRecording = () => {
+    if (isNative) {
+      if (isRecording) return; // the system speech dialog handles stopping
+      setIsRecording(true);
+      listenOnce(selectedLang.ttsCode)
+        .then(transcript => { if (transcript) setInputText(transcript); })
+        .catch(e => {
+          console.warn("Voice input notice:", e?.message || e);
+          alert(t(selectedLang.code, 'errorVoice'));
+        })
+        .finally(() => setIsRecording(false));
+      return;
+    }
     if (isRecording) {
       recognitionRef.current?.stop();
     } else {
+      if (!recognitionRef.current) {
+        alert(t(selectedLang.code, 'errorVoice'));
+        return;
+      }
       try {
-        if (recognitionRef.current) {
-          recognitionRef.current.lang = selectedLang.ttsCode;
-        }
-        recognitionRef.current?.start();
+        recognitionRef.current.lang = selectedLang.ttsCode;
+        recognitionRef.current.start();
         setIsRecording(true);
       } catch (e) {
         alert(t(selectedLang.code, 'errorVoice'));
       }
     }
   };
+
+  const handleCameraClick = async () => {
+    if (!isNative) {
+      fileInputRef.current?.click();
+      return;
+    }
+    try {
+      const dataUrl = await pickCropPhoto({
+        header: t(selectedLang.code, 'takePhoto'),
+        camera: t(selectedLang.code, 'takePhoto'),
+        gallery: t(selectedLang.code, 'fromGallery'),
+        cancel: t(selectedLang.code, 'cancel'),
+      });
+      if (dataUrl) setSelectedImage(dataUrl);
+    } catch (e: any) {
+      console.warn("Photo picker notice:", e?.message || e);
+    }
+  };
+
+  // Android hardware back: close the topmost overlay / sub-view before leaving the app
+  const handleBackButtonRef = useRef<() => void>(() => {});
+  handleBackButtonRef.current = () => {
+    if (isVoiceModalOpen) setIsVoiceModalOpen(false);
+    else if (isLangModalOpen) setIsLangModalOpen(false);
+    else if (isCityModalOpen) setIsCityModalOpen(false);
+    else if (isGoogleModalOpen) setIsGoogleModalOpen(false);
+    else if (showLogoutConfirm) setShowLogoutConfirm(false);
+    else if (!isLoggedIn && authStep === 'email-details') setAuthStep('initial');
+    else if (isLoggedIn && activeTab === 'settings' && settingsView !== 'main') setSettingsView('main');
+    else if (isLoggedIn && activeTab !== 'chat') setActiveTab('chat');
+    else CapacitorApp.exitApp();
+  };
+
+  useEffect(() => {
+    if (!isNative) return;
+    const listener = CapacitorApp.addListener('backButton', () => handleBackButtonRef.current());
+    return () => { listener.then(l => l.remove()); };
+  }, []);
 
   // --- EMAIL AUTH ---
   const handleEmailContinue = () => {
@@ -533,19 +678,32 @@ const App: React.FC = () => {
           <div className="w-full space-y-4 flex flex-col items-center">
             {authStep === 'initial' ? (
               <>
-                {/* Custom Branded Google Button - 100% Reliable across sandbox iframes */}
-                <button
-                  onClick={() => setIsGoogleModalOpen(true)}
-                  className="w-full flex items-center justify-center gap-3.5 bg-white text-gray-700 hover:bg-gray-50 border border-gray-200 font-bold py-4 px-6 rounded-[24px] shadow-md transition-transform active:scale-95 duration-200 max-w-[320px] mx-auto cursor-pointer"
-                >
-                  <svg className="w-5.5 h-5.5 shrink-0" viewBox="0 0 24 24">
-                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
-                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-                  </svg>
-                  <span className="text-[15px] font-black">{t(selectedLang.code, 'loginWithGoogle')}</span>
-                </button>
+                {!isNative && (<>
+                <div className="w-full flex justify-center py-2 max-w-[320px] mx-auto overflow-hidden rounded-full shadow-md transition-transform active:scale-95 bg-white">
+                  <GoogleLogin 
+                    onSuccess={(credentialResponse) => {
+                       if (credentialResponse.credential) {
+                         const decoded: any = jwtDecode(credentialResponse.credential);
+                         const userData: User = {
+                           name: decoded.name,
+                           email: decoded.email,
+                           picture: decoded.picture,
+                           isVerified: true,
+                         };
+                         setUser(userData);
+                         setIsLoggedIn(true);
+                       }
+                    }}
+                    onError={() => {
+                      console.log('Login Failed');
+                    }}
+                    useOneTap={false}
+                    theme={theme === 'dark' ? 'filled_black' : 'outline'}
+                    shape="pill"
+                    text="signin_with"
+                    width="320"
+                  />
+                </div>
                 
                 {authLoading && <Loader2 className="w-6 h-6 animate-spin text-white mb-2" />}
 
@@ -554,6 +712,7 @@ const App: React.FC = () => {
                   <span className="text-[10px] font-black text-emerald-100/40 uppercase tracking-widest">{t(selectedLang.code, 'or')}</span>
                   <div className="flex-1 h-px bg-white/10"></div>
                 </div>
+                </>)}
 
                 <div className="space-y-4 w-full">
                   <div className="relative group">
@@ -621,7 +780,7 @@ const App: React.FC = () => {
     <div className={`flex flex-col h-screen max-w-md mx-auto transition-all duration-500 shadow-2xl relative overflow-hidden font-['Hind'] ${theme === 'dark' ? 'bg-gray-950 text-gray-100' : 'bg-gray-50 text-gray-900'}`}>
       
       {/* GLOBAL HEADER */}
-      <header className={`${theme === 'dark' ? 'bg-[#064e3b]' : 'bg-[#14532d]'} text-white pt-6 pb-4 px-4 shadow-lg z-30 transition-all duration-300`}>
+      <header className={`${theme === 'dark' ? 'bg-[#064e3b]' : 'bg-[#14532d]'} text-white safe-pt-header pb-4 px-4 shadow-lg z-30 transition-all duration-300`}>
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2.5">
             <div className="bg-green-100/10 p-1.5 rounded-xl border border-white/10">
@@ -668,7 +827,7 @@ const App: React.FC = () => {
       </header>
 
       {/* MAIN CONTENT AREA */}
-      <main className={`flex-1 overflow-y-auto p-4 relative no-scrollbar pb-24 transition-colors duration-500 ${theme === 'dark' ? 'bg-gray-950' : 'bg-white'}`} ref={scrollRef}>
+      <main className={`flex-1 overflow-y-auto p-4 relative no-scrollbar safe-pb-main transition-colors duration-500 ${theme === 'dark' ? 'bg-gray-950' : 'bg-white'}`} ref={scrollRef}>
         
         {/* CHAT TAB */}
         {activeTab === 'chat' && (
@@ -1102,7 +1261,7 @@ const App: React.FC = () => {
 
       {/* FOOTER INPUT (Chat only) */}
       {activeTab === 'chat' && (
-        <footer className={`p-4 border-t mb-16 shadow-[0_-12px_30px_rgba(0,0,0,0.06)] z-20 transition-colors ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+        <footer className={`p-4 border-t safe-mb-nav shadow-[0_-12px_30px_rgba(0,0,0,0.06)] z-20 transition-colors ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
           {selectedImage && (
             <div className="mb-4 relative inline-block animate-pop-in">
               <img src={selectedImage} className="w-24 h-24 rounded-[32px] border-4 border-emerald-600 shadow-xl object-cover" />
@@ -1118,7 +1277,7 @@ const App: React.FC = () => {
             theme === 'dark' ? 'bg-gray-800 border-transparent focus-within:border-emerald-600' : 'bg-gray-100 border-transparent focus-within:border-emerald-500 focus-within:bg-white'
           }`}>
             <button 
-              onClick={() => fileInputRef.current?.click()}
+              onClick={handleCameraClick}
               className={`p-3 rounded-2xl shadow-md transition active:scale-90 ${theme === 'dark' ? 'bg-gray-700 text-emerald-400' : 'bg-white text-emerald-700 hover:bg-emerald-50'}`}
               title={t(selectedLang.code, 'takePhoto')}
             >
@@ -1159,7 +1318,7 @@ const App: React.FC = () => {
       )}
 
       {/* BOTTOM NAVIGATION */}
-      <nav className={`fixed bottom-0 left-0 right-0 max-w-md mx-auto border-t flex justify-around items-center h-18 shadow-[0_-4px_30px_rgba(0,0,0,0.1)] z-40 transition-colors ${
+      <nav className={`fixed bottom-0 left-0 right-0 max-w-md mx-auto border-t flex justify-around items-center safe-nav shadow-[0_-4px_30px_rgba(0,0,0,0.1)] z-40 transition-colors ${
         theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'
       }`}>
         <button 

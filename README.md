@@ -62,4 +62,45 @@
 
 ---
 
+## 📱 Android App (APK)
+
+The Android app wraps the same React frontend with [Capacitor 8](https://capacitorjs.com). On Android it uses native plugins for voice input, read-aloud (TTS), and the camera/gallery picker, because the Android WebView doesn't provide the Web Speech API.
+
+**Package ID:** `in.appsgain.kisanmitra`
+
+### AI backend for the app
+
+The APK has no local server, so it either:
+
+* **calls Gemini directly** with `VITE_GEMINI_API_KEY` from `.env.android.local` (the default), or
+* **uses a deployed `server.ts`** if `VITE_API_BASE_URL` is set.
+
+> ⚠️ A key bundled into an APK can be extracted by anyone who has the APK. Restrict the key in Google Cloud Console (API restrictions plus quotas), or move to a backend before publishing widely.
+
+### Build a signed release APK
+
+Prerequisites: Node 20+, Android SDK (API 36), and JDK 17–24 for Gradle 8.14. The Gradle toolchain resolver downloads JDK 21 automatically.
+
+1. Create `.env.android.local` (gitignored):
+   ```
+   VITE_GEMINI_API_KEY=your-gemini-key
+   ```
+2. Put your release keystore in `keystore/` (gitignored), next to a `keystore/keystore.properties` file:
+   ```
+   storeFile=kisan-mitra-release.jks
+   storePassword=...
+   keyAlias=kisanmitra
+   keyPassword=...
+   ```
+3. Build:
+   ```bash
+   npm install
+   npm run apk:release
+   ```
+   Output: `android/app/build/outputs/apk/release/app-release.apk`
+
+> **Windows note:** Android build tools fail when the project path contains non-ASCII characters (for example, this folder's Devanagari name). Either clone into an ASCII-only path, or map the folder to a drive letter (`subst K: "<project path>"`) and run Gradle from `K:ndroid`.
+
+---
+
 **किसान मित्र - उन्नत खेती, समृद्ध किसान।** 🇮🇳

@@ -1,150 +1,176 @@
 
-import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
+import { GoogleGenAI, type Content, type GenerateContentResponse } from "@google/genai";
 import { GroundingSource } from "../types";
 
-const SYSTEM_INSTRUCTION = `
-आप "किसान मित्र" (Kisan Mitra) हैं, जो भारतीय किसानों के लिए एक उन्नत कृषि विशेषज्ञ और सलाहकार है। 
+// Empty on the web (same-origin server). Set VITE_API_BASE_URL to send an app
+// build to a deployed backend instead.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
 
-नियम:
-1. भाषा: उपयोगकर्ता की चुनी हुई भाषा में उत्तर दें। 
-2. इमेज एनालिसिस: फोटो में फसल की बीमारी पहचानें और जैविक/रासायनिक समाधान दें।
-3. उत्तर की संरचना:
-   - 🌿 पहचान: बीमारी का सटीक नाम।
-   - 💊 समाधान: जैविक (Organic) और रासायनिक (Chemical) दोनों तरीके।
-   - 🛡️ रोकथाम: भविष्य के बचाव के तरीके।
-   - 📈 मंडी टिप: वर्तमान बाजार रुझान।
-4. गूगल सर्च: मंडी भाव और मौसम के लिए हमेशा ताज़ा डेटा खोजें।
-5. सुरक्षा: रसायनों के उपयोग के लिए सरकारी नियमों का पालन करने की चेतावनी दें।
+// Android build only (from .env.android.local): with no backend URL, the app calls
+// Gemini directly with this key. Anything bundled here can be extracted from the APK.
+const GEMINI_API_KEY: string = import.meta.env.VITE_GEMINI_API_KEY || "";
+const GEMINI_MODEL = "gemini-3.8-flash";
+const useDirectGemini = !API_BASE && !!GEMINI_API_KEY;
+
+const SYSTEM_INSTRUCTION = `
+You are "Kisan Mitra," an advanced agricultural expert and advisor for Indian farmers.
+
+Rules:
+1. Language: Answer in the user's chosen language, in simple words a farmer understands.
+2. Image Analysis: Identify the crop disease in the photo and give organic/chemical solutions.
+3. Response Structure (for crop problems):
+   - 🌿 Identification: Exact name of the disease or pest.
+   - 💊 Solution: Both Organic and Chemical methods, with dosage.
+   - 🛡️ Prevention: Future prevention methods.
+   - 📈 Mandi Tip: Current market trends for that crop.
+   For general questions, answer directly and concisely.
+4. Data freshness: Use Google Search for prices, weather, government schemes and anything time-sensitive.
+5. Safety: Warn to follow government laws for chemicals and to consult the local Krishi Vigyan Kendra before heavy chemical use.
+6. Formatting: Plain text only (the app cannot render markdown): no **, #, or tables. Use emojis as section markers and "•" for bullet points.
 `;
 
-// Analyze crop using text and/or image with search grounding
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+// The chat bubble shows plain text, so strip markdown the model may still emit
+const toPlainText = (text: string): string =>
+  text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/^(\s*)[*-]\s+/gm, '$1• ')
+    .replace(/^#{1,6}\s*/gm, '');
+
+let client: GoogleGenAI | null = null;
+const gemini = () => (client ??= new GoogleGenAI({ apiKey: GEMINI_API_KEY }));
+
+const extractSources = (response: GenerateContentResponse): GroundingSource[] => {
+  const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+  const seen = new Set<string>();
+  const sources: GroundingSource[] = [];
+  for (const chunk of chunks) {
+    const uri = chunk.web?.uri;
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
+    sources.push({ title: chunk.web?.title || uri, uri });
+  }
+  return sources.slice(0, 5);
+};
+
+// Gemini expects alternating turns that start with the user.
+const toGeminiHistory = (history: ChatTurn[]): Content[] => {
+  const contents: Content[] = [];
+  for (const turn of history) {
+    if (!turn.content.trim()) continue;
+    const role = turn.role === 'user' ? 'user' : 'model';
+    if (contents.length === 0 && role === 'model') continue;
+    const last = contents[contents.length - 1];
+    if (last && last.role === role) {
+      last.parts!.push({ text: turn.content });
+    } else {
+      contents.push({ role, parts: [{ text: turn.content }] });
+    }
+  }
+  if (contents.length && contents[contents.length - 1].role === 'user') contents.pop();
+  return contents;
+};
+
+const analyzeWithGemini = async (
+  prompt: string,
+  image: string | undefined,
+  location: string | undefined,
+  language: string,
+  history: ChatTurn[],
+): Promise<{ text: string; sources: GroundingSource[] }> => {
+  const parts: any[] = [];
+  if (image) {
+    const [header, data] = image.split(",");
+    const mimeType = header.match(/:(.*?);/)?.[1] || "image/jpeg";
+    parts.push({ inlineData: { mimeType, data } });
+  }
+  parts.push({
+    text: `City Context: ${location || "Unknown"}.
+User Language: ${language}.
+Query: ${prompt || "Please analyze this crop photo."}`,
+  });
+
+  const response = await gemini().models.generateContent({
+    model: GEMINI_MODEL,
+    contents: [...toGeminiHistory(history), { role: "user", parts }],
+    config: {
+      systemInstruction: SYSTEM_INSTRUCTION,
+      tools: [{ googleSearch: {} }],
+    },
+  });
+
+  const text = response.text?.trim();
+  if (!text) throw new Error("Empty response from Gemini");
+  return { text, sources: extractSources(response) };
+};
+
+const dashboardWithGemini = async (city: string) => {
+  const prompt = `Use Google Search to find today's mandi (APMC / Agmarknet) modal prices for the 3 most traded crops in ${city}, India, and the current weather in ${city}.
+Return ONLY a valid JSON object, no other text:
+{
+  "weather": { "temp": "e.g. 32°C", "condition": "Hindi + English, e.g. धूप (Sunny)", "humidity": "e.g. 45%" },
+  "mandi": [ { "crop": "Hindi + English, e.g. गेहूं (Wheat)", "price": "per quintal, amount only, e.g. ₹2,450", "trend": "up | down | stable" } ]
+}`;
+
+  const response = await gemini().models.generateContent({
+    model: GEMINI_MODEL,
+    contents: prompt,
+    config: { tools: [{ googleSearch: {} }] },
+  });
+
+  let text = response.text || "{}";
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) {
+    text = fenced[1];
+  } else {
+    const first = text.indexOf("{");
+    const last = text.lastIndexOf("}");
+    if (first !== -1 && last !== -1) text = text.substring(first, last + 1);
+  }
+  const data = JSON.parse(text);
+  return { ...data, sources: extractSources(response) };
+};
+
 export const analyzeCrop = async (
   prompt: string,
   image?: string,
   location?: string,
-  language: string = 'Hindi'
+  language: string = 'Hindi',
+  history: ChatTurn[] = []
 ): Promise<{ text: string; sources: GroundingSource[] }> => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("Gemini API Key is missing");
+  if (useDirectGemini) {
+    const result = await analyzeWithGemini(prompt, image, location, language, history);
+    return { ...result, text: toPlainText(result.text) };
   }
-  const ai = new GoogleGenAI({ apiKey });
-  
-  const parts: any[] = [];
-  
-  if (image) {
-    const mimeType = image.split(';')[0].split(':')[1] || 'image/jpeg';
-    parts.push({
-      inlineData: {
-        mimeType: mimeType,
-        data: image.split(',')[1],
-      },
-    });
-  }
-  
-  const fullPrompt = `City Context: ${location || 'Unknown'}. 
-  User Language: ${language}.
-  Query: ${prompt}`;
-
-  parts.push({ text: fullPrompt });
-
-  const config: any = {
-    systemInstruction: SYSTEM_INSTRUCTION,
-  };
-
-  // Only use googleSearch if no image is provided, as multimodal + search might conflict
-  if (!image) {
-    config.tools = [{ googleSearch: {} }];
-  }
-
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: { parts },
-    config,
+  const res = await fetch(`${API_BASE}/api/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, image, location, language }),
   });
-
-  const text = response.text || "क्षमा करें, मैं अभी जानकारी प्राप्त नहीं कर पा रहा हूँ।";
-  
-  const sources: GroundingSource[] = [];
-  const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-  if (groundingChunks) {
-    groundingChunks.forEach((chunk: any) => {
-      if (chunk.web) {
-        sources.push({
-          title: chunk.web.title,
-          uri: chunk.web.uri,
-        });
-      }
-    });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || "Failed to analyze crop");
   }
-
-  return { text, sources };
+  const result = await res.json();
+  return { ...result, text: toPlainText(result.text || "") };
 };
 
-// Fetch real-time dashboard data using search grounding and structured JSON output
 export const getDashboardData = async (city: string) => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("Gemini API Key is missing");
+  if (useDirectGemini) {
+    return dashboardWithGemini(city);
   }
-  const ai = new GoogleGenAI({ apiKey });
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: `Get real-time Mandi rates for top 3 crops and current weather for ${city}. Return ONLY a valid JSON object with the following structure:
-{
-  "weather": {
-    "temp": "string (e.g., 32°C)",
-    "condition": "string (e.g., Sunny)",
-    "humidity": "string (e.g., 45%)"
-  },
-  "mandi": [
-    {
-      "crop": "string",
-      "price": "string",
-      "trend": "up, down, or stable"
-    }
-  ]
-}`,
-    config: {
-      tools: [{ googleSearch: {} }],
-    }
+  const res = await fetch(`${API_BASE}/api/dashboard`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ city }),
   });
-
-  // Extract grounding sources as required by guidelines when using googleSearch
-  const sources: GroundingSource[] = [];
-  const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-  if (groundingChunks) {
-    groundingChunks.forEach((chunk: any) => {
-      if (chunk.web) {
-        sources.push({
-          title: chunk.web.title,
-          uri: chunk.web.uri,
-        });
-      }
-    });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || "Failed to fetch dashboard data");
   }
-
-  try {
-    let text = response.text || "{}";
-    const jsonMatch = text.match(/```json\n?([\s\S]*?)\n?```/);
-    if (jsonMatch) {
-      text = jsonMatch[1];
-    } else {
-      const genericMatch = text.match(/```\n?([\s\S]*?)\n?```/);
-      if (genericMatch) {
-        text = genericMatch[1];
-      } else {
-        const firstBrace = text.indexOf('{');
-        const lastBrace = text.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace !== -1) {
-          text = text.substring(firstBrace, lastBrace + 1);
-        }
-      }
-    }
-    const data = JSON.parse(text);
-    return { ...data, sources };
-  } catch (e) {
-    console.error("JSON Parse Error in getDashboardData:", e, response.text);
-    return null;
-  }
+  return res.json();
 };

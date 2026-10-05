@@ -4,6 +4,17 @@
   --font-sans: "Hind", ui-sans-serif, system-ui, sans-serif;
 }
 
+/* Safe-area insets: Capacitor injects --safe-area-inset-* on Android; browsers use env() */
+:root {
+  --inset-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --inset-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+}
+
+.safe-pt-header { padding-top: calc(1.5rem + var(--inset-top)); }
+.safe-pb-main { padding-bottom: calc(6rem + var(--inset-bottom)); }
+.safe-mb-nav { margin-bottom: calc(4rem + var(--inset-bottom)); }
+.safe-nav { height: calc(4.5rem + var(--inset-bottom)); padding-bottom: var(--inset-bottom); }
+
 body {
   margin: 0;
   padding: 0;
